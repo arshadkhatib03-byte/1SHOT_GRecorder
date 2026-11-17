@@ -1,0 +1,6 @@
+{
+  "name": "FrameZero Studio",
+  "description": "Zero-lag, high-quality screen and microphone recorder studio with hardware codec optimization, dual audio mixing, and preview offload for smooth gaming.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
