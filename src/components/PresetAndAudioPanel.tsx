@@ -1,5 +1,5 @@
 import React from 'react';
-import { Mic, MicOff, Volume2, VolumeX } from 'lucide-react';
+import { FolderOpen, Mic, MicOff, Volume2, VolumeX } from 'lucide-react';
 import type {
   CaptureSettings,
   CodecSupportInfo,
@@ -18,9 +18,12 @@ interface PresetAndAudioPanelProps {
   disabled: boolean;
   isTestingMic: boolean;
   micLevel: number;
+  directoryPickerSupported: boolean;
+  selectedFolderName: string | null;
   onSelectPreset: (presetId: PresetId) => void;
   onUpdateSettings: (patch: Partial<CaptureSettings>) => void;
   onToggleMicTest: () => void;
+  onChooseFolder: () => void;
 }
 
 export const PresetAndAudioPanel: React.FC<PresetAndAudioPanelProps> = ({
@@ -31,9 +34,12 @@ export const PresetAndAudioPanel: React.FC<PresetAndAudioPanelProps> = ({
   disabled,
   isTestingMic,
   micLevel,
+  directoryPickerSupported,
+  selectedFolderName,
   onSelectPreset,
   onUpdateSettings,
   onToggleMicTest,
+  onChooseFolder,
 }) => {
   const availableCodecs = supportedCodecs.filter((c) => c.supported);
 
@@ -226,6 +232,78 @@ export const PresetAndAudioPanel: React.FC<PresetAndAudioPanelProps> = ({
             <span
               className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
                 settings.ecoPreviewDuringRec ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </button>
+        </div>
+
+        {/* Auto-Save to Device Storage Toggle */}
+        <div className="space-y-3 border-t border-white/[0.07] pt-5">
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-0.5">
+              <div className="text-sm font-semibold text-white">{presetsT.autoSaveLabel}</div>
+              <p className="text-xs text-slate-400">{presetsT.autoSaveHint}</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.autoSaveToDevice}
+              onClick={() =>
+                onUpdateSettings({ autoSaveToDevice: !settings.autoSaveToDevice })
+              }
+              className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 ${
+                settings.autoSaveToDevice ? 'bg-emerald-600' : 'bg-slate-700'
+              }`}
+            >
+              <span
+                className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                  settings.autoSaveToDevice ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+
+          {directoryPickerSupported && (
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+              <span className="text-xs text-slate-400">
+                {selectedFolderName
+                  ? `${presetsT.folderReadyLabel} ${selectedFolderName}`
+                  : 'Default: Browser Downloads folder'}
+              </span>
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={onChooseFolder}
+                className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-white/10 transition-colors disabled:opacity-50"
+              >
+                <FolderOpen className="h-3.5 w-3.5" />
+                <span>{presetsT.chooseFolderBtn}</span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Anti-Black-Screen Safe Mode Toggle */}
+        <div className="flex items-center justify-between gap-4 border-t border-white/[0.07] pt-5">
+          <div className="space-y-0.5">
+            <div className="text-sm font-semibold text-white">{presetsT.safeCanvasLabel}</div>
+            <p className="text-xs text-slate-400">{presetsT.safeCanvasHint}</p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            disabled={disabled}
+            aria-checked={settings.safeCanvasCapture}
+            onClick={() =>
+              onUpdateSettings({ safeCanvasCapture: !settings.safeCanvasCapture })
+            }
+            className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 disabled:opacity-50 ${
+              settings.safeCanvasCapture ? 'bg-rose-600' : 'bg-slate-700'
+            }`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                settings.safeCanvasCapture ? 'translate-x-6' : 'translate-x-1'
               }`}
             />
           </button>

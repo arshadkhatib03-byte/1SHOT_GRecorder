@@ -46,6 +46,12 @@ export interface Translations {
     countdownLabel: string;
     ecoPreviewLabel: string;
     ecoPreviewHint: string;
+    autoSaveLabel: string;
+    autoSaveHint: string;
+    safeCanvasLabel: string;
+    safeCanvasHint: string;
+    chooseFolderBtn: string;
+    folderReadyLabel: string;
   };
   audio: {
     sectionTitle: string;
@@ -100,6 +106,7 @@ export interface Translations {
     micIncluded: string;
     screenOnly: string;
     closePlayer: string;
+    shareSave: string;
   };
 }
 
@@ -140,7 +147,7 @@ export const EN_COPY: Translations = {
     sectionTitle: 'Capture Profile & Zero-Lag Engine',
     sectionDesc: 'Pick a tuned performance profile or customize resolution, frame rate, and hardware codec.',
     zeroLagGaming: 'Game Mode (Zero-Lag)',
-    zeroLagGamingDesc: '1080p · 60 FPS · Hardware codec · Preview offload ON',
+    zeroLagGamingDesc: 'Native res · 60 FPS · Unlimited duration · Hardware-friendly codec',
     ultraQuality: 'Ultra HD Quality',
     ultraQualityDesc: 'Native res · 60 FPS · 16 Mbps bitrate · Crisp detail',
     batterySaver: 'Cool & Battery Safe',
@@ -154,6 +161,12 @@ export const EN_COPY: Translations = {
     countdownLabel: 'Start Countdown',
     ecoPreviewLabel: 'Zero-Lag Preview Offload',
     ecoPreviewHint: 'Hides the live mirror while recording so games get maximum GPU/CPU priority.',
+    autoSaveLabel: 'Auto-Save to Device Storage',
+    autoSaveHint: 'Automatically downloads each finished recording to your phone or PC Downloads folder.',
+    safeCanvasLabel: 'Anti-Black-Screen Safe Mode',
+    safeCanvasHint: 'Routes screen frames through a 2D canvas pipeline if your GPU records black video in direct mode.',
+    chooseFolderBtn: 'Choose Save Folder',
+    folderReadyLabel: 'Saving directly to folder:',
   },
   audio: {
     sectionTitle: 'Dual Audio Mixer',
@@ -208,5 +221,6 @@ export const EN_COPY: Translations = {
     micIncluded: 'Mic + Screen',
     screenOnly: 'Screen Only',
     closePlayer: 'Close Player',
+    shareSave: 'Save / Share',
   },
 };

@@ -1,11 +1,19 @@
 import type { RecordedClip } from '../types/recorder';
 
 const DB_NAME = 'framezero_clips_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'clips';
+const CHUNKS_STORE = 'recording_chunks';
 
 interface StoredClipRecord extends Omit<RecordedClip, 'blobUrl'> {
   blob: Blob;
+}
+
+interface StoredChunkRecord {
+  key: string;
+  sessionId: string;
+  seq: number;
+  chunk: Blob;
 }
 
 function openDB(): Promise<IDBDatabase> {
@@ -17,10 +25,76 @@ function openDB(): Promise<IDBDatabase> {
         const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
         store.createIndex('createdAt', 'createdAt', { unique: false });
       }
+      if (!db.objectStoreNames.contains(CHUNKS_STORE)) {
+        const chunkStore = db.createObjectStore(CHUNKS_STORE, { keyPath: 'key' });
+        chunkStore.createIndex('sessionId', 'sessionId', { unique: false });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
+}
+
+export async function appendChunkToDB(
+  sessionId: string,
+  seq: number,
+  chunk: Blob
+): Promise<void> {
+  const db = await openDB();
+  const record: StoredChunkRecord = {
+    key: `${sessionId}_${String(seq).padStart(8, '0')}`,
+    sessionId,
+    seq,
+    chunk,
+  };
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(CHUNKS_STORE, 'readwrite');
+    tx.objectStore(CHUNKS_STORE).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+export async function assembleChunksFromDB(
+  sessionId: string,
+  mimeType: string
+): Promise<Blob | null> {
+  const db = await openDB();
+  const records = await new Promise<StoredChunkRecord[]>((resolve, reject) => {
+    const tx = db.transaction(CHUNKS_STORE, 'readonly');
+    const index = tx.objectStore(CHUNKS_STORE).index('sessionId');
+    const req = index.getAll(IDBKeyRange.only(sessionId));
+    req.onsuccess = () => resolve(req.result as StoredChunkRecord[]);
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+
+  if (records.length === 0) return null;
+  records.sort((a, b) => a.seq - b.seq);
+  return new Blob(
+    records.map((r) => r.chunk),
+    { type: mimeType }
+  );
+}
+
+export async function clearSessionChunksFromDB(sessionId: string): Promise<void> {
+  const db = await openDB();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(CHUNKS_STORE, 'readwrite');
+    const store = tx.objectStore(CHUNKS_STORE);
+    const index = store.index('sessionId');
+    const req = index.getAllKeys(IDBKeyRange.only(sessionId));
+    req.onsuccess = () => {
+      const keys = req.result;
+      for (const k of keys) {
+        store.delete(k);
+      }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
 }
 
 export async function saveClipToDB(

@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from 'react';
-import { Download, Edit3, Film, Play, Search, Trash2, X } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Download, Edit3, Film, Play, Search, Share2, Trash2, X } from 'lucide-react';
 import type { RecordedClip } from '../types/recorder';
 import type { Translations } from '../i18n/translations';
 import { formatBytes, formatDuration, getFileExtensionForMime } from '../utils/captureEngine';
@@ -7,8 +7,12 @@ import { formatBytes, formatDuration, getFileExtensionForMime } from '../utils/c
 interface ClipsLibraryProps {
   t: Translations['clips'];
   clips: RecordedClip[];
+  activeClipId: string | null;
+  onSelectClipId: (id: string | null) => void;
+  canShareFiles: boolean;
   onStartFirstRecording: () => void;
   onDownloadClip: (clip: RecordedClip) => void;
+  onShareClip: (clip: RecordedClip) => void;
   onDeleteClip: (id: string) => void;
   onRenameClip: (id: string, newName: string) => void;
 }
@@ -18,16 +22,25 @@ type ClipFilter = 'all' | 'mic' | 'high-fps';
 export const ClipsLibrary: React.FC<ClipsLibraryProps> = ({
   t,
   clips,
+  activeClipId,
+  onSelectClipId,
+  canShareFiles,
   onStartFirstRecording,
   onDownloadClip,
+  onShareClip,
   onDeleteClip,
   onRenameClip,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filter, setFilter] = useState<ClipFilter>('all');
-  const [activeClipId, setActiveClipId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const playerContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setPlaybackError(null);
+  }, [activeClipId]);
 
   const filteredClips = useMemo(() => {
     return clips.filter((clip) => {
@@ -104,7 +117,10 @@ export const ClipsLibrary: React.FC<ClipsLibraryProps> = ({
 
       {/* Inline Playback Player */}
       {activeClip && activeClip.blobUrl && (
-        <div className="overflow-hidden rounded-2xl border border-white/[0.1] bg-[#13161D]">
+        <div
+          ref={playerContainerRef}
+          className="overflow-hidden rounded-2xl border border-white/[0.1] bg-[#13161D]"
+        >
           <div className="flex items-center justify-between border-b border-white/[0.08] px-4 py-3 sm:px-6">
             <div className="min-w-0">
               <div className="font-semibold text-white truncate">{activeClip.name}</div>
@@ -116,22 +132,33 @@ export const ClipsLibrary: React.FC<ClipsLibraryProps> = ({
             </div>
             <button
               type="button"
-              onClick={() => setActiveClipId(null)}
+              onClick={() => onSelectClipId(null)}
               className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-white/10"
             >
               <X className="h-4 w-4" />
               <span>{t.closePlayer}</span>
             </button>
           </div>
-          <div className="bg-black flex items-center justify-center">
+          <div className="bg-black flex flex-col items-center justify-center">
             <video
               key={activeClip.id}
               src={activeClip.blobUrl}
               controls
               autoPlay
               playsInline
-              className="max-h-[480px] w-full object-contain"
+              preload="metadata"
+              onError={() =>
+                setPlaybackError(
+                  'This browser could not preview the recorded codec inline. Click Download to play it in your device video player.'
+                )
+              }
+              className="aspect-video max-h-[540px] w-full bg-black object-contain"
             />
+            {playbackError && (
+              <div className="w-full border-t border-white/10 bg-rose-950/40 px-4 py-2.5 text-xs text-rose-200">
+                {playbackError}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -213,7 +240,15 @@ export const ClipsLibrary: React.FC<ClipsLibraryProps> = ({
                 <div className="flex items-center gap-2 shrink-0">
                   <button
                     type="button"
-                    onClick={() => setActiveClipId(clip.id)}
+                    onClick={() => {
+                      onSelectClipId(clip.id);
+                      window.setTimeout(() => {
+                        playerContainerRef.current?.scrollIntoView({
+                          behavior: 'smooth',
+                          block: 'nearest',
+                        });
+                      }, 60);
+                    }}
                     className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/10 transition-colors"
                   >
                     <Play className="h-3.5 w-3.5" />
@@ -228,6 +263,17 @@ export const ClipsLibrary: React.FC<ClipsLibraryProps> = ({
                     <Download className="h-3.5 w-3.5" />
                     <span>{t.download}</span>
                   </button>
+
+                  {canShareFiles && (
+                    <button
+                      type="button"
+                      onClick={() => onShareClip(clip)}
+                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-white hover:bg-white/10 transition-colors"
+                    >
+                      <Share2 className="h-3.5 w-3.5" />
+                      <span>{t.shareSave}</span>
+                    </button>
+                  )}
 
                   <button
                     type="button"

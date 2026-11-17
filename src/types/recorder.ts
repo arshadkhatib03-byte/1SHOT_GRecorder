@@ -22,6 +22,8 @@ export interface CaptureSettings {
   echoCancellation: boolean;
   autoGainControl: boolean;
   ecoPreviewDuringRec: boolean; // Zero-lag preview offload during active recording
+  autoSaveToDevice: boolean; // Automatically save finished recordings to device Downloads / chosen folder
+  safeCanvasCapture: boolean; // Anti-black-screen canvas frame pipeline for GPU compatibility
   countdownSec: CountdownOption;
 }
 

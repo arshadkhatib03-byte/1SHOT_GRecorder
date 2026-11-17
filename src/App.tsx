@@ -9,15 +9,26 @@ import type {
 } from './types/recorder';
 import {
   applyPresetToSettings,
+  buildClipFilename,
+  createCanvasSafePipeline,
+  createResilientMediaRecorder,
   getBestLowLagCodec,
-  getFileExtensionForMime,
   getInitialSettings,
   getResolutionConstraints,
+  isDirectoryPickerSupported,
+  isDisplayCaptureBlockedByPolicy,
   isDisplayMediaSupported,
+  isRunningInIframe,
+  isWebShareFilesSupported,
   measureFramePacing,
   probeSupportedCodecs,
+  triggerBrowserDownload,
+  waitForVideoFrameReady,
 } from './utils/captureEngine';
 import {
+  appendChunkToDB,
+  assembleChunksFromDB,
+  clearSessionChunksFromDB,
   deleteClipFromDB,
   getAllClipsFromDB,
   getClipBlobFromDB,
@@ -41,6 +52,12 @@ export default function App() {
     [supportedCodecs]
   );
   const displayMediaSupported = useMemo(() => isDisplayMediaSupported(), []);
+  const directoryPickerSupported = useMemo(() => isDirectoryPickerSupported(), []);
+  const canShareFiles = useMemo(() => isWebShareFilesSupported(), []);
+  const initialIframeBlocked = useMemo(
+    () => isRunningInIframe() && isDisplayCaptureBlockedByPolicy(),
+    []
+  );
 
   const [settings, setSettings] = useState<CaptureSettings>(() =>
     getInitialSettings(supportedCodecs)
@@ -50,6 +67,11 @@ export default function App() {
   const [countdownRemaining, setCountdownRemaining] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [saveNotice, setSaveNotice] = useState<string | null>(null);
+  const [selectedFolderName, setSelectedFolderName] = useState<string | null>(null);
+  const [isIframeBlocked, setIsIframeBlocked] = useState(initialIframeBlocked);
+  const [hasSystemAudioLive, setHasSystemAudioLive] = useState(false);
+  const [hasMicAudioLive, setHasMicAudioLive] = useState(false);
 
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
   const [isMicMutedLive, setIsMicMutedLive] = useState(false);
@@ -58,15 +80,23 @@ export default function App() {
   const [micLevel, setMicLevel] = useState(0);
 
   const [clips, setClips] = useState<RecordedClip[]>([]);
+  const [activeClipId, setActiveClipId] = useState<string | null>(null);
+  const [latestClipId, setLatestClipId] = useState<string | null>(null);
   const [metrics, setMetrics] = useState<FramePacingMetrics | null>(null);
   const [isMeasuring, setIsMeasuring] = useState(false);
 
   // Refs for active media pipeline
   const displayStreamRef = useRef<MediaStream | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
+  const directoryHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
   const combinedStreamRef = useRef<MediaStream | null>(null);
+  const canvasCleanupRef = useRef<(() => void) | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const sessionIdRef = useRef<string | null>(null);
+  const chunkSeqRef = useRef<number>(0);
+  const chunkWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const usingIdbStreamingRef = useRef<boolean>(true);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const micGainNodeRef = useRef<GainNode | null>(null);
   const systemGainNodeRef = useRef<GainNode | null>(null);
@@ -167,6 +197,11 @@ export default function App() {
     combinedStreamRef.current?.getTracks().forEach((tr) => tr.stop());
     combinedStreamRef.current = null;
 
+    if (canvasCleanupRef.current) {
+      canvasCleanupRef.current();
+      canvasCleanupRef.current = null;
+    }
+
     if (audioCtxRef.current) {
       audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
@@ -177,6 +212,8 @@ export default function App() {
     setPreviewStream(null);
     setIsTestingMic(false);
     setIsMicMutedLive(false);
+    setHasSystemAudioLive(false);
+    setHasMicAudioLive(false);
   }, [stopMicMeter]);
 
   useEffect(() => {
@@ -220,6 +257,9 @@ export default function App() {
       });
       micStreamRef.current = stream;
       const ctx = new AudioContext({ latencyHint: 'playback' });
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
       audioCtxRef.current = ctx;
       const source = ctx.createMediaStreamSource(stream);
       const gain = ctx.createGain();
@@ -248,22 +288,41 @@ export default function App() {
 
   const finalizeRecording = useCallback(async () => {
     const recorder = mediaRecorderRef.current;
-    const chunks = chunksRef.current;
+    const sessionId = sessionIdRef.current;
+    const usedIdb = usingIdbStreamingRef.current;
     const meta = captureMetaRef.current;
 
     const totalMs =
       Date.now() - recordingStartMsRef.current - pausedAccumulatedMsRef.current;
     const durationSec = Math.max(1, Math.round(totalMs / 1000));
-
     const mimeType = recorder?.mimeType || meta.mimeType || 'video/webm';
-    const blob = new Blob(chunks, { type: mimeType });
+
+    // Wait for any in-flight 2s chunk writes to IndexedDB before assembling
+    await chunkWriteQueueRef.current.catch(() => {});
+
+    let blob: Blob | null = null;
+    if (usedIdb && sessionId) {
+      try {
+        blob = await assembleChunksFromDB(sessionId, mimeType);
+      } catch {
+        blob = null;
+      }
+    }
+    if (!blob && chunksRef.current.length > 0) {
+      blob = new Blob(chunksRef.current, { type: mimeType });
+    }
+    if (sessionId) {
+      void clearSessionChunksFromDB(sessionId).catch(() => {});
+    }
+
     chunksRef.current = [];
+    sessionIdRef.current = null;
 
     cleanupStreams();
     setCaptureState('idle');
     setElapsedSeconds(0);
 
-    if (blob.size === 0) return;
+    if (!blob || blob.size === 0) return;
 
     const now = new Date();
     const stamp = `${now.getHours().toString().padStart(2, '0')}-${now
@@ -287,6 +346,8 @@ export default function App() {
     try {
       const savedClip = await saveClipToDB(clipRecord, blob);
       setClips((prev) => [savedClip, ...prev]);
+      setLatestClipId(savedClip.id);
+      setActiveClipId(savedClip.id);
     } catch {
       // Fallback in-memory URL if IndexedDB quota is exceeded
       const fallbackClip: RecordedClip = {
@@ -294,8 +355,37 @@ export default function App() {
         blobUrl: URL.createObjectURL(blob),
       };
       setClips((prev) => [fallbackClip, ...prev]);
+      setLatestClipId(fallbackClip.id);
+      setActiveClipId(fallbackClip.id);
     }
-  }, [cleanupStreams]);
+
+    // Save automatically to device storage (chosen folder or browser Downloads)
+    const filename = buildClipFilename(clipRecord.name, mimeType);
+    if (settings.autoSaveToDevice) {
+      let savedToFolder = false;
+      if (directoryHandleRef.current) {
+        try {
+          const fileHandle = await directoryHandleRef.current.getFileHandle(filename, {
+            create: true,
+          });
+          const writable = await fileHandle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          savedToFolder = true;
+          setSaveNotice(`Saved "${filename}" directly to folder "${directoryHandleRef.current.name}".`);
+        } catch {
+          savedToFolder = false;
+        }
+      }
+
+      if (!savedToFolder) {
+        triggerBrowserDownload(blob, filename);
+        setSaveNotice(`Saved "${filename}" to your device Downloads folder and Clips Library.`);
+      }
+    } else {
+      setSaveNotice(`Saved "${clipRecord.name}" to Clips Library.`);
+    }
+  }, [cleanupStreams, settings.autoSaveToDevice]);
 
   const stopCapture = useCallback(() => {
     if (captureState === 'countdown') {
@@ -316,38 +406,55 @@ export default function App() {
   }, [captureState, cleanupStreams]);
 
   const beginMediaRecorder = useCallback(
-    (streamToRecord: MediaStream, hasMic: boolean, hasSystemAudio: boolean) => {
+    (
+      streamToRecord: MediaStream,
+      hasMic: boolean,
+      hasSystemAudio: boolean,
+      detectedWidth: number,
+      detectedHeight: number
+    ) => {
       const videoTrack = streamToRecord.getVideoTracks()[0];
       const trackSettings = videoTrack?.getSettings();
-      const chosenMime =
-        settings.mimeType && MediaRecorder.isTypeSupported(settings.mimeType)
-          ? settings.mimeType
-          : '';
+
+      const recorder = createResilientMediaRecorder(
+        streamToRecord,
+        settings.mimeType,
+        settings.videoBitrateMbps * 1_000_000
+      );
+      mediaRecorderRef.current = recorder;
+
+      const sessionId = `rec_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      sessionIdRef.current = sessionId;
+      chunkSeqRef.current = 0;
+      chunkWriteQueueRef.current = Promise.resolve();
+      usingIdbStreamingRef.current = true;
+      chunksRef.current = [];
 
       captureMetaRef.current = {
-        width: trackSettings?.width ?? 0,
-        height: trackSettings?.height ?? 0,
+        width: detectedWidth || trackSettings?.width || 0,
+        height: detectedHeight || trackSettings?.height || 0,
         fps: Math.round(trackSettings?.frameRate ?? settings.fps),
-        mimeType: chosenMime || 'video/webm',
+        mimeType: recorder.mimeType || settings.mimeType || 'video/webm',
         hasMic,
         hasSystemAudio,
       };
 
-      const recorderOptions: MediaRecorderOptions = {
-        videoBitsPerSecond: settings.videoBitrateMbps * 1_000_000,
-        audioBitsPerSecond: 128_000,
-      };
-      if (chosenMime) {
-        recorderOptions.mimeType = chosenMime;
-      }
-
-      const recorder = new MediaRecorder(streamToRecord, recorderOptions);
-      mediaRecorderRef.current = recorder;
-      chunksRef.current = [];
-
       recorder.ondataavailable = (ev) => {
         if (ev.data && ev.data.size > 0) {
-          chunksRef.current.push(ev.data);
+          const chunk = ev.data;
+          if (usingIdbStreamingRef.current && sessionIdRef.current) {
+            const seq = chunkSeqRef.current++;
+            const sid = sessionIdRef.current;
+            chunkWriteQueueRef.current = chunkWriteQueueRef.current
+              .then(() => appendChunkToDB(sid, seq, chunk))
+              .catch(() => {
+                // Fall back to memory array if IndexedDB fails mid-session
+                usingIdbStreamingRef.current = false;
+                chunksRef.current.push(chunk);
+              });
+          } else {
+            chunksRef.current.push(chunk);
+          }
         }
       };
 
@@ -355,7 +462,7 @@ export default function App() {
         void finalizeRecording();
       };
 
-      // Flush chunks every 2 seconds to prevent RAM spikes and game micro-stutters
+      // Flush chunks every 2 seconds to IndexedDB so unlimited-duration recording keeps RAM flat
       recorder.start(2000);
       recordingStartMsRef.current = Date.now();
       pausedAccumulatedMsRef.current = 0;
@@ -363,7 +470,8 @@ export default function App() {
       setCaptureState('recording');
 
       timerIntervalRef.current = window.setInterval(() => {
-        setElapsedSeconds((prev) => prev + 1);
+        const ms = Date.now() - recordingStartMsRef.current - pausedAccumulatedMsRef.current;
+        setElapsedSeconds(Math.max(0, Math.floor(ms / 1000)));
       }, 1000);
     },
     [settings.fps, settings.mimeType, settings.videoBitrateMbps, finalizeRecording]
@@ -376,18 +484,30 @@ export default function App() {
         stopMicTest();
       }
 
+      const attemptStartedAt = performance.now();
       try {
         let displayStream: MediaStream | null = null;
         if (!micOnly) {
           const resConstraints = getResolutionConstraints(settings.resolution);
-          displayStream = await navigator.mediaDevices.getDisplayMedia({
+          const displayOptions = {
             video: {
               ...resConstraints,
-              frameRate: { ideal: settings.fps, max: settings.fps },
+              frameRate: { ideal: settings.fps },
             },
-            audio: settings.systemAudioEnabled,
-          });
+            audio: settings.systemAudioEnabled
+              ? {
+                  echoCancellation: false,
+                  noiseSuppression: false,
+                  autoGainControl: false,
+                }
+              : false,
+            systemAudio: 'include',
+            surfaceSwitching: 'include',
+            monitorTypeSurfaces: 'include',
+          } as DisplayMediaStreamOptions;
+          displayStream = await navigator.mediaDevices.getDisplayMedia(displayOptions);
           displayStreamRef.current = displayStream;
+          setIsIframeBlocked(false);
         }
 
         let micStream: MediaStream | null = null;
@@ -417,9 +537,22 @@ export default function App() {
         // Build mixed audio track via playback-latency Web Audio graph
         const hasDisplayAudio = (displayStream?.getAudioTracks().length ?? 0) > 0;
         const hasMicAudio = (micStream?.getAudioTracks().length ?? 0) > 0;
+        setHasSystemAudioLive(hasDisplayAudio);
+        setHasMicAudioLive(hasMicAudio);
+
+        if (!micOnly && settings.systemAudioEnabled && !hasDisplayAudio) {
+          setErrorMessage(
+            'Screen is recording, but no game/system audio was shared. Next time, turn on "Share system audio" (or "Share tab audio") in the browser picker.'
+          );
+        }
+
         const outputTracks: MediaStreamTrack[] = [];
+        let readySize = { width: 0, height: 0 };
 
         if (displayStream) {
+          // Wait until the display stream delivers a real decoded frame (prevents black/0x0 recordings)
+          readySize = await waitForVideoFrameReady(displayStream);
+
           displayStream.getVideoTracks().forEach((track) => {
             track.onended = () => {
               const rec = mediaRecorderRef.current;
@@ -430,12 +563,29 @@ export default function App() {
                 setCaptureState('idle');
               }
             };
-            outputTracks.push(track);
           });
+
+          if (settings.safeCanvasCapture) {
+            const safePipeline = createCanvasSafePipeline(
+              displayStream,
+              settings.fps,
+              readySize.width,
+              readySize.height
+            );
+            canvasCleanupRef.current = safePipeline.cleanup;
+            if (safePipeline.track) {
+              outputTracks.push(safePipeline.track);
+            }
+          } else {
+            displayStream.getVideoTracks().forEach((track) => outputTracks.push(track));
+          }
         }
 
         if (hasDisplayAudio || hasMicAudio) {
           const ctx = new AudioContext({ latencyHint: 'playback' });
+          if (ctx.state === 'suspended') {
+            await ctx.resume();
+          }
           audioCtxRef.current = ctx;
           const dest = ctx.createMediaStreamDestination();
 
@@ -470,7 +620,8 @@ export default function App() {
 
         const combined = new MediaStream(outputTracks);
         combinedStreamRef.current = combined;
-        setPreviewStream(combined);
+        // Preview the raw displayStream directly so live monitor shows the screen immediately
+        setPreviewStream(displayStream ?? combined);
 
         if (settings.countdownSec > 0 && !micOnly) {
           let remaining: number = settings.countdownSec;
@@ -484,24 +635,49 @@ export default function App() {
                 window.clearInterval(countdownIntervalRef.current);
                 countdownIntervalRef.current = null;
               }
-              beginMediaRecorder(combined, hasMicAudio, hasDisplayAudio);
+              beginMediaRecorder(
+                combined,
+                hasMicAudio,
+                hasDisplayAudio,
+                readySize.width,
+                readySize.height
+              );
             } else {
               setCountdownRemaining(remaining);
             }
           }, 1000);
         } else {
-          beginMediaRecorder(combined, hasMicAudio, hasDisplayAudio);
+          beginMediaRecorder(
+            combined,
+            hasMicAudio,
+            hasDisplayAudio,
+            readySize.width,
+            readySize.height
+          );
         }
       } catch (err) {
+        const rejectionMs = performance.now() - attemptStartedAt;
         cleanupStreams();
         setCaptureState('idle');
+        const msg = err instanceof Error ? err.message : '';
+        const policyBlocked =
+          isDisplayCaptureBlockedByPolicy() ||
+          /permissions?\s*policy|disallowed|feature/i.test(msg) ||
+          (!micOnly && isRunningInIframe() && rejectionMs < 200);
+
         if (err instanceof Error && err.message === 'mic-denied') {
           setErrorMessage('Microphone permission was denied.');
+        } else if (policyBlocked) {
+          setIsIframeBlocked(true);
+          setErrorMessage(
+            'Screen recording is blocked inside this embedded preview frame. Click "Open in New Tab" on the right to record your screen and game audio.'
+          );
         } else if (err instanceof DOMException && err.name === 'NotAllowedError') {
-          // User closed the screen picker voluntarily; keep message subtle
-          setErrorMessage(null);
+          setErrorMessage('Screen selection was canceled or permission was denied.');
         } else {
-          setErrorMessage('Could not start screen capture. Please verify browser permissions.');
+          setErrorMessage(
+            msg ? `Could not start recording: ${msg}` : 'Could not start screen capture. Please verify browser permissions.'
+          );
         }
       }
     },
@@ -531,7 +707,8 @@ export default function App() {
       recorder.resume();
       pausedAccumulatedMsRef.current += Date.now() - pauseStartedMsRef.current;
       timerIntervalRef.current = window.setInterval(() => {
-        setElapsedSeconds((prev) => prev + 1);
+        const ms = Date.now() - recordingStartMsRef.current - pausedAccumulatedMsRef.current;
+        setElapsedSeconds(Math.max(0, Math.floor(ms / 1000)));
       }, 1000);
       setCaptureState('recording');
     }
@@ -579,28 +756,63 @@ export default function App() {
     setIsMeasuring(false);
   }, []);
 
-  const handleDownloadClip = useCallback(async (clip: RecordedClip) => {
-    const ext = getFileExtensionForMime(clip.mimeType);
-    const safeName = clip.name.replace(/[^a-zA-Z0-9_-]+/g, '_');
-    let href = clip.blobUrl;
-    let shouldRevoke = false;
+  const handleChooseFolder = useCallback(async () => {
+    try {
+      const picker = (
+        window as unknown as {
+          showDirectoryPicker?: (opts?: { mode?: 'readwrite' }) => Promise<FileSystemDirectoryHandle>;
+        }
+      ).showDirectoryPicker;
+      if (!picker) return;
+      const handle = await picker({ mode: 'readwrite' });
+      directoryHandleRef.current = handle;
+      setSelectedFolderName(handle.name);
+      setSettings((prev) => ({ ...prev, autoSaveToDevice: true }));
+    } catch {
+      // User canceled folder picker
+    }
+  }, []);
 
-    if (!href) {
-      const blob = await getClipBlobFromDB(clip.id);
-      if (!blob) return;
-      href = URL.createObjectURL(blob);
-      shouldRevoke = true;
+  const handleDownloadClip = useCallback(async (clip: RecordedClip) => {
+    const filename = buildClipFilename(clip.name, clip.mimeType);
+    const blob = await getClipBlobFromDB(clip.id);
+    if (blob) {
+      triggerBrowserDownload(blob, filename);
+      setSaveNotice(`Downloaded "${filename}" to your device storage.`);
+      return;
     }
 
-    const a = document.createElement('a');
-    a.href = href;
-    a.download = `${safeName}.${ext}`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    if (clip.blobUrl) {
+      const a = document.createElement('a');
+      a.href = clip.blobUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+  }, []);
 
-    if (shouldRevoke) {
-      URL.revokeObjectURL(href);
+  const handleShareClip = useCallback(async (clip: RecordedClip) => {
+    const filename = buildClipFilename(clip.name, clip.mimeType);
+    let blob = await getClipBlobFromDB(clip.id);
+    if (!blob && clip.blobUrl) {
+      const res = await fetch(clip.blobUrl);
+      blob = await res.blob();
+    }
+    if (!blob) return;
+
+    const file = new File([blob], filename, { type: clip.mimeType || 'video/webm' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({
+          files: [file],
+          title: clip.name,
+        });
+      } catch {
+        // User canceled share sheet
+      }
+    } else {
+      triggerBrowserDownload(blob, filename);
     }
   }, []);
 
@@ -653,7 +865,17 @@ export default function App() {
           micLevel={micLevel}
           isMicMutedLive={isMicMutedLive}
           displayMediaSupported={displayMediaSupported}
+          isIframeBlocked={isIframeBlocked}
+          hasSystemAudioLive={hasSystemAudioLive}
+          hasMicAudioLive={hasMicAudioLive}
           errorMessage={errorMessage}
+          saveNotice={saveNotice}
+          latestClipId={latestClipId}
+          onDismissSaveNotice={() => setSaveNotice(null)}
+          onWatchLatestClip={(id) => {
+            setActiveClipId(id);
+            document.getElementById('clips')?.scrollIntoView({ behavior: 'smooth' });
+          }}
           onStartScreenCapture={() => void startCapturePipeline(false)}
           onStartMicOnlyCapture={() => void startCapturePipeline(true)}
           onCancelCountdown={stopCapture}
@@ -673,16 +895,23 @@ export default function App() {
           disabled={isBusy}
           isTestingMic={isTestingMic}
           micLevel={micLevel}
+          directoryPickerSupported={directoryPickerSupported}
+          selectedFolderName={selectedFolderName}
           onSelectPreset={handleSelectPreset}
           onUpdateSettings={handleUpdateSettings}
           onToggleMicTest={() => void handleToggleMicTest()}
+          onChooseFolder={() => void handleChooseFolder()}
         />
 
         <ClipsLibrary
           t={t.clips}
           clips={clips}
+          activeClipId={activeClipId}
+          onSelectClipId={setActiveClipId}
+          canShareFiles={canShareFiles}
           onStartFirstRecording={handlePrimaryHeaderAction}
           onDownloadClip={(clip) => void handleDownloadClip(clip)}
+          onShareClip={(clip) => void handleShareClip(clip)}
           onDeleteClip={(id) => void handleDeleteClip(id)}
           onRenameClip={(id, name) => void handleRenameClip(id, name)}
         />
